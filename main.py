@@ -1,51 +1,94 @@
 from fastmcp import FastMCP
-import random
-import json
+import os
+import sqlite3
 
-# Create the FastMCP server instance
-mcp = FastMCP("Simple Calculator Server")
+DB_PATH = os.path.join(os.path.dirname(__file__), "expenses.db")
+CATEGORIES_PATH = os.path.join(os.path.dirname(__file__), "categories.json")
 
-# Tool: Add two numbers
+mcp = FastMCP(name="ExpenseTracker")
+
+def init_db():
+    """Initialize the database and create the expenses table if it doesn't exist."""
+    with sqlite3.connect(DB_PATH) as c:
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS expenses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT NOT NULL,
+                amount REAL NOT NULL,
+                category TEXT NOT NULL,
+                subcategory TEXT DEFAULT '',
+                note TEXT DEFAULT ''    
+            )
+        ''')
+    
+init_db()
+
 @mcp.tool()
-def add(a: int, b: int) -> int:
-    """Add two numbers.
-    
-    Args:
-        a (int): The first number.
-        b (int): The second number.
-    
-    Returns:
-        int: The sum of the two numbers.
-    """
-    return a + b
+def add_expense(date, amount, category, subcategory, note):
+    """Add a new expense to the database."""
+    with sqlite3.connect(DB_PATH) as c:
+        cur = c.execute('''
+            INSERT INTO expenses (date, amount, category, subcategory, note)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (date, amount, category, subcategory, note))
+    return {"status": "ok", "id": cur.lastrowid}
 
-# Tool: Generate a random number
 @mcp.tool()
-def random_number(min_val: int = 1, max_val: int = 100) -> int:
-    """Generate a random number between min_val and max_val.
+def list_expenses(start_date, end_date):
+    """List all expenses in the database within a date range."""
+    with sqlite3.connect(DB_PATH) as c:
+        cur = c.execute('SELECT * FROM expenses WHERE date >= ? AND date <= ? ORDER BY id ASC', (start_date, end_date))
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
     
-    Args:
-        min_val (int): The minimum value (inclusive).
-        max_val (int): The maximum value (inclusive).
+@mcp.tool()
+def summarize(start_date, end_date, category=None):
+    """Summarize expenses by category in an inclusive date range."""
+    with sqlite3.connect(DB_PATH) as c:
+        query = ('''
+            SELECT category, SUM(amount) as total
+            FROM expenses
+            WHERE date >= ? AND date <= ? AND category = ?
+        ''')
+        params = [start_date, end_date]
+
+        if category:
+            query += ' AND category = ?'
+            params.append(category)
+
+        query += " GROUP BY category ORDER BY category ASC"
+
+        cur = c.execute(query, params)
+        cols = [d[0] for d in cur.description]
+        return {row[0]: row[1] for row in cur.fetchall()}
     
-    Returns:
-        int: A random number between min_val and max_val.
-    """
-    return random.randint(min_val, max_val)
+@mcp.resource("expense://categories", mime_type="application/json")  # Changed: expense:// → expense:///
+def categories():
+    try:
+        # Provide default categories if file doesn't exist
+        default_categories = {
+            "categories": [
+                "Food & Dining",
+                "Transportation",
+                "Shopping",
+                "Entertainment",
+                "Bills & Utilities",
+                "Healthcare",
+                "Travel",
+                "Education",
+                "Business",
+                "Other"
+            ]
+        }
+        
+        try:
+            with open(CATEGORIES_PATH, "r", encoding="utf-8") as f:
+                return f.read()
+        except FileNotFoundError:
+            import json
+            return json.dumps(default_categories, indent=2)
+    except Exception as e:
+        return f'{{"error": "Could not load categories: {str(e)}"}}'
 
-# Resource: Server information
-@mcp.resource("info://server")
-def server_info() -> str:
-    """Get information about the server."""
-    info = {
-        "name": "Simple Calculator Server",
-        "version": "1.0",
-        "description": "A basic MCP server with math tools",
-        "tools": ["add", "random_number"],
-        "author": "Suraj Chaudhary"
-    }
-    return json.dumps(info)
-
-# Start the FastMCP server
 if __name__ == "__main__":
-    mcp.run(transport="sse", host="0.0.0.0", port=3001)
+    mcp.run(transport="http", host = "0.0.0.0", port = 8000)
